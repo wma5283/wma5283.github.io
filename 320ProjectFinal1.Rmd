@@ -1,0 +1,428 @@
+---
+title: "Project Final"
+author: "William Ma"
+date: "May 22, 2019"
+output: html_document
+---
+#Data Science Tutorial
+_Welcome to the world of data science! In this tutorial, we will go over important concepts that you will need to know as a data scientist. The topics we will go over includes: data wrangling (cleaning and unifying complex datasets for easy access and analysis), EDA (or Exploratory Data Analysis), Machine Learning (Linear Regression), and final discussion of the insights learned from analysis._
+
+#SAT Scores and Property Sales of New York City
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rvest)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(broom)
+library(leaflet)
+```
+
+This analysis will examine two datasets: SAT Scores of public schools and Property Sales, both located in New York City at relatively the same time. I would like to know if there is a direct correlation that can be established between these two attributes. This analysis will use cost of living (property price) within a borough as an indicator of wealth, and cumulative SAT scores (out of 2400) as an indicator of academic performance. I hope to prove with substantial data that there is a direct correlation between family wealth and academic performance. 
+
+##Ingest Data
+The following datasets that I will use are labeled, "scores.csv" and "nyc-rolling-sales.csv", both extracted from Kaggle.
+```{r, echo=TRUE}
+school_df <- read.csv(file="scores.csv", header=TRUE, sep=",")
+property_df <- read.csv(file="nyc-rolling-sales.csv", header=TRUE, sep=",")
+
+head(school_df)
+head(property_df)
+```
+##Data Wrangling
+###Tidy Property Data
+
+NYC Property Sales dataset will be labeled 'property_df', which contains information about sales that had occurred in recent years, including the property price, boroughs the property is in, gross square feet, etc. The most important information we need in this dataset is the borough and property price. Afterwards, the data is manipulated as follows:
+
+- First, we want to change the boroughs column to have actual names instead of numbers, so that we can join tables later for wrangling. 
+- Then, we will rename the variable for clarity.
+- There are many '-' indicating missing values under property price and gross square feet. We will replace them with the average of all property price or all gross square feet.
+- There are also many 0's in property prices. According to the datasource, $0 essentially means transfer of ownership, and this can harm our analysis. We will set all 0's to the average of all property prices.
+- We will create a new attribute "property level", which categorizes the level of how much a property cost. This data will be used later in visualization.
+- Many of the missing values are located property price and gross square feet. The best way to handle this data is to impute the empty slots with the average of their respective columns.
+
+```{r, echo=TRUE}
+property_df <- property_df %>%
+    mutate(Borough = ifelse(BOROUGH == 1, 'Manhattan', ifelse(BOROUGH == 2, 'Bronx', ifelse(BOROUGH == 3, 'Brooklyn', ifelse(BOROUGH == 4, 'Queens', ifelse(BOROUGH == 5, 'Staten Island', NA)))))) %>%
+  select(Borough, GROSS.SQUARE.FEET, SALE.PRICE) %>%
+  rename(
+    gross_sqr_ft = GROSS.SQUARE.FEET,
+    property_price = SALE.PRICE
+  )
+property_df$Borough <- as.factor(property_df$Borough)
+suppressWarnings(property_df$property_price <- as.numeric(as.character(property_df$property_price)))
+suppressWarnings(property_df$gross_sqr_ft <- as.numeric(as.character(property_df$gross_sqr_ft)))
+
+property_df[property_df == 0] <- NA
+
+property_df <- property_df %>%
+  mutate(property_level =
+    ifelse(property_price >= 0 & property_price < 10000, "D", ifelse(property_price >= 10000 & property_price < 50000, "C", ifelse(property_price >= 50000 & property_price < 400000, "B", ifelse(property_price >= 400000, "A", NA))))
+  ) %>%
+  arrange(property_price)
+
+property_df <- property_df %>%
+  replace_na(list(property_price=mean(.$property_price, na.rm = TRUE))) %>%
+  replace_na(list(gross_sqr_ft=mean(.$gross_sqr_ft, na.rm = TRUE)))
+
+head(property_df)
+```
+###Tidy Property Data
+
+NYC Public School SAT Scores dataset will be labeled 'school_df', which contains information about SAT assessment performances that had occurred in recent years, including the reading, writing, and math scores, student demographic, borough, latitude, longitude, etc. The most important information we need in this dataset is the borough, SAT scores, and location (latitude, longitude). Afterwards, the data is manipulated as follows:
+
+- First, we want to combine the average scores of each school's SAT sections (reading, writing, and math) for our analysis. The cumulative score will be out of 2400.
+- We will then rename for clarity
+- We will create a new column that divides and categorizes a student's SAT score. This will be used later in data visualization.
+- All missing values are found in SAT scores, because some of these public schools do not require students to take the SAT, such as the school for the disabled. We will set their scores as the average.
+```{r, echo=TRUE}
+school_df <- school_df %>%
+  select(School.ID, School.Name, Borough, Latitude, Longitude, Average.Score..SAT.Math., Average.Score..SAT.Reading., Average.Score..SAT.Writing.) %>%
+  group_by(School.ID, School.Name, Borough, Latitude, Longitude) %>%
+  summarize(sat_score = sum(Average.Score..SAT.Math., Average.Score..SAT.Writing., Average.Score..SAT.Reading.)) %>%
+  rename(
+    school_id = School.ID,
+    school_name = School.Name
+  ) %>%
+  mutate(score_level =
+    ifelse(sat_score >= 0 && sat_score < 600, "D", ifelse(sat_score >= 600 && sat_score < 1200, "C", ifelse(sat_score >= 1200 && sat_score < 1800, "B", ifelse(sat_score >= 1800 && sat_score <= 2400, "A", NA))))
+  )
+school_df <- school_df %>%
+  replace_na(list(sat_score=mean(.$sat_score, na.rm = TRUE))) %>%
+  replace_na(list(score_level='D'))
+head(school_df)
+```
+
+###Combining datasets
+
+We will now combine both school_df and property_df via left_join. The join will matched by the 'Borough' column. Also, it is important to note that property prices have been filtered down to between 1,000 and 500,000 USD. The purpose for this is because of the wide range of housing cost that exists in New York City. As mentioned earlier, many property prices were $0 due to transferring ownership between family members. There were thousands of that specific case. Also there were many outliers that existed beyond millions of dollars in property value. The difference in price is astronomical and will definitely harm the analysis. We are also taking a small sample of the dataset due to the sheer amount of entities that exists.
+```{r, echo = TRUE}
+borough_df <- school_df %>%
+  left_join(property_df, by='Borough') %>%
+  group_by(Borough) %>%
+  filter(property_price >= 1000 & property_price <= 500000) %>%
+  sample_frac(.01)
+borough_df
+
+```
+
+We are now ready for our EDA!
+
+
+##Exploratory Data Analysis (EDA)
+
+###SAT Score Distribution across NYC Boroughs
+
+In this first plot, we want to see the data distribution across each NYC borough and observe difference in central tendency. The SAT score is scored out of 2400.
+```{r, echo=TRUE}
+eda1_boxplot <- borough_df %>%
+  rowid_to_column() %>%
+  ggplot(mapping = aes(x=factor(Borough), y=sat_score)) +
+  geom_boxplot() +
+  labs(title="SAT Score Distribution across NYC Boroughs",
+  x = "Boroughs",
+  y = "SAT Scores (out of 2400)")
+eda1_boxplot
+```
+
+We can see that there are outliers in every borough. In terms of highest scores when comparing the median, Staten Island comes first. The highest score overall goes to a school in Manhattan. Let us now look at the Property Prices Distribution across the NYC Boroughs...
+
+###Property Price Distribution across NYC Boroughs
+
+```{r, echo=TRUE}
+eda1_boxplot <- borough_df %>%
+  rowid_to_column() %>%
+  ggplot(mapping = aes(x=factor(Borough), y=property_price)) +
+  geom_boxplot() +
+  labs(title="Property Price Distribution across NYC Boroughs",
+  x = "Boroughs",
+  y = "Property Prices (USD)")
+eda1_boxplot
+```
+
+Based on these plots, we can see that the median property price of Manhattan is the highest compared to the rest, indicating that this borough is the wealthiest.
+
+###SAT Score Distribution vs. SAT Scores across NYC Boroughs
+
+Now let's answer the million dollar question, is property price (wealth) directly correlated to SAT scores (academic performance)? We will now create a scatter plot for these two numeric attributes:
+
+```{r, echo=TRUE}
+eda1_scatter <- borough_df %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score)) %>%
+  ggplot(mapping=aes(y=mean_score, x=property_price, color=factor(Borough))) +
+  geom_point() + geom_smooth(method=lm) +
+  labs(title="Property Prices vs. SAT Scores across NYC Boroughs",
+  x = "Property Prices (USD)",
+  y = "SAT Scores (out of 2400)")
+eda1_scatter
+
+```
+
+The graph above depicts all the data points of SAT scores and property prices, each point colored with their specific borough. This graph is ugly and overwhelming. Let's try to make it easier to look at and get a better grasp of the data we see.
+
+We will now plot the same graph. But this time, instead of color coding our boroughs, we will now facet our visualization. This means that we will create different graphs, splitting based on conditions we have set. In this case, we are splitting based on different boroughs.
+
+```{r, echo=TRUE}
+eda1_scatter <- borough_df %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score)) %>%
+  ggplot(mapping=aes(y=mean_score, x=property_price)) +
+  facet_grid(Borough~.) +
+  geom_point() + geom_smooth(method=lm) +
+  labs(title="Property Prices vs. SAT Scores across NYC Boroughs",
+  x = "Property Prices (USD)",
+  y = "SAT Scores (out of 2400)")
+eda1_scatter
+```
+
+The graphs are now easier to look at. We will take it one step further and graph each borough individually. The reason is to examine the linear regression, and plot residual graphs to determine if the linear relationship is a good approximation.
+
+```{r, echo=TRUE}
+bronx_scatter <- borough_df %>%
+  filter(Borough == 'Bronx') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score)) %>%
+  ggplot(mapping=aes(y=mean_score, x=property_price)) +
+  geom_point() + geom_smooth(method=lm) +
+  labs(title="Property Prices vs. SAT Scores in Bronx",
+  x = "Property Prices (USD)",
+  y = "SAT Scores (out of 2400)")
+bronx_scatter
+```
+
+```{r, echo=TRUE}
+brooklyn_scatter <- borough_df %>%
+  filter(Borough == 'Brooklyn') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score)) %>%
+  ggplot(mapping=aes(y=mean_score, x=property_price)) +
+  geom_point() + geom_smooth(method=lm) +
+  labs(title="Property Prices vs. SAT Scores in Brooklyn",
+  x = "Property Prices (USD)",
+  y = "SAT Scores (out of 2400)")
+brooklyn_scatter
+```
+
+```{r, echo=TRUE}
+manhattan_scatter <- borough_df %>%
+  filter(Borough == 'Manhattan') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score)) %>%
+  ggplot(mapping=aes(y=mean_score, x=property_price)) +
+  geom_point() + geom_smooth(method=lm) +
+  labs(title="Property Prices vs. SAT Scores in Manhattan",
+  x = "Property Prices (USD)",
+  y = "SAT Scores (out of 2400)")
+manhattan_scatter
+```
+
+```{r, echo=TRUE}
+queens_scatter <- borough_df %>%
+  filter(Borough == 'Queens') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score)) %>%
+  ggplot(mapping=aes(y=mean_score, x=property_price)) +
+  geom_point() + geom_smooth(method=lm) +
+  labs(title="Property Prices vs. SAT Scores in Queens",
+  x = "Property Prices (USD)",
+  y = "SAT Scores (out of 2400)")
+queens_scatter
+```
+
+```{r, echo=TRUE}
+staten_scatter <- borough_df %>%
+  filter(Borough == 'Staten Island') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score)) %>%
+  ggplot(mapping=aes(y=mean_score, x=property_price)) +
+  geom_point() + geom_smooth(method=lm) +
+  labs(title="Property Prices vs. SAT Scores in Staten Island",
+  x = "Property Prices (USD)",
+  y = "SAT Scores (out of 2400)")
+staten_scatter
+```
+
+There appears to be a gradual linear relationship. The SAT score moves slightly upward the higher the property prices go. There seems to be high residuals in all the plots. 
+
+##Residual Graphs
+
+We will confirm that the linear relationship is a good approximation by plotting the residuals against property prices for each borough.
+
+```{r, echo=TRUE}
+bronx_data <- borough_df %>%
+  filter(Borough == 'Bronx') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score))
+
+bronx_res <- lm(formula = mean_score~property_price, data = bronx_data) 
+tidy(bronx_res)
+
+bronx_res <- bronx_res %>%
+  augment() %>%
+  ggplot(mapping = aes(x=property_price, y=.resid)) +
+  geom_point() +
+  labs(title="Property Prices in Bronx vs. Residuals",
+  x = "Property Prices (USD)",
+  y = "Residual")
+bronx_res
+
+```
+
+```{r, echo=TRUE}
+brooklyn_data <- borough_df %>%
+  filter(Borough == 'Brooklyn') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score))
+
+brooklyn_res <- lm(formula = mean_score~property_price, data = brooklyn_data)
+tidy(brooklyn_res)
+
+brooklyn_res <- brooklyn_res %>%
+  augment() %>%
+  ggplot(mapping = aes(x=property_price, y=.resid)) +
+  geom_point() +
+  labs(title="Property Prices in Brooklyn vs. Residuals",
+  x = "Property Prices (USD)",
+  y = "Residual")
+brooklyn_res
+```
+
+```{r, echo=TRUE}
+manhattan_data <- borough_df %>%
+  filter(Borough == 'Manhattan') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score))
+
+manhattan_res <- lm(formula = mean_score~property_price, data = manhattan_data)
+tidy(manhattan_res)
+
+manhattan_res <- manhattan_res %>%
+  augment() %>%
+  ggplot(mapping = aes(x=property_price, y=.resid)) +
+  geom_point() +
+  labs(title="Property Prices in Manhattan vs. Residuals",
+  x = "Property Prices (USD)",
+  y = "Residual")
+manhattan_res
+```
+
+```{r, echo=TRUE}
+queens_data <- borough_df %>%
+  filter(Borough == 'Queens') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score))
+
+queens_res <- lm(formula = mean_score~property_price, data = queens_data)
+tidy(queens_res)
+
+queens_res <- queens_res %>%
+  augment() %>%
+  ggplot(mapping = aes(x=property_price, y=.resid)) +
+  geom_point() +
+  labs(title="Property Prices in Queens vs. Residuals",
+  x = "Property Prices (USD)",
+  y = "Residual")
+queens_res
+```
+
+```{r, echo=TRUE}
+staten_data <- borough_df %>%
+  filter(Borough == 'Staten Island') %>%
+  rowid_to_column() %>%
+  group_by(Borough, property_price) %>%
+  summarize(mean_score = mean(sat_score))
+
+staten_res <- lm(formula = mean_score~property_price, data = staten_data)
+tidy(staten_res)
+
+staten_res <- staten_res %>%
+  augment() %>%
+  ggplot(mapping = aes(x=property_price, y=.resid)) +
+  geom_point() +
+  labs(title="Property Prices in Staten Island vs. Residuals",
+  x = "Property Prices (USD)",
+  y = "Residual")
+staten_res
+```
+
+
+At a glance, we can see that the value is centered around 0 and no correlation between residual and property prices. We can conclude that the linear model is appropriate. Also we can see that Bronx and Queens boroughs experiences very slight increase, while the other boroughs experiences very slight decreases in property price.
+
+###Leaflet
+
+In this section, we will create visualizations of our data point using Leaflet. First we will set up our latitude and longitude on NYC.
+
+```{r, echo=TRUE}
+nyc_map <- leaflet(borough_df) %>%
+ addTiles() %>%
+ setView(lat=40.73, lng=-73.93, zoom=13)
+nyc_map
+```
+
+We are now ready to input data. In this first implementation, we will simply mark all data points based on boroughs.
+```{r, echo=TRUE}
+pal <- colorFactor(c("green","yellow", "orange", "red", "black"), domain = c("Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island"))
+leaflet(borough_df) %>% addTiles() %>%
+ addCircleMarkers(
+ radius = 8,
+ color = ~pal(Borough),
+ stroke = FALSE, fillOpacity = 0.8
+ )
+
+```
+
+Remember the score_level we made in the beginning of the tutorial? We will use that column to color code the various SAT scores in NYC.
+```{r, echo=TRUE}
+pal <- colorFactor(c("green","yellow", "red", "black"), domain = c("A", "B", "C", "D"))
+leaflet(borough_df) %>% addTiles() %>%
+ addCircleMarkers(
+ radius = 5,
+ color = ~pal(score_level),
+ stroke = FALSE, fillOpacity = 0.8
+ )
+
+```
+
+Just like the score_level, property_level will be used for visualization, categorizing the properties based on grades determined at the beginning of this tutorial.
+```{r, echo=TRUE}
+pal <- colorFactor(c("green","yellow", "red", "black"), domain = c("A", "B", "C", "D"))
+leaflet(borough_df) %>% addTiles() %>%
+ addCircleMarkers(
+ radius = 5,
+ color = ~pal(property_level),
+ stroke = FALSE, fillOpacity = 0.6
+ )
+
+```
+
+
+##Discussion
+
+OVerall, the correlation between property price and SAT score is very slight. After plotting different graphs, such as facets, individual plots, and data visualizations with leaflet, many of these plots indicate little to no correlation. However, the residual graph confirms that the linear model is a good fit. There are many aspects involved with the conclusion as to why property prices has little impact to academic performance. One possibility is the cost of living in New York City is relatively higher than other places in the country. This might mean that the public school system in a relatively wealthy area can provide further educational assistance. 
+
+Another possible reason as to the small trends we observed could be the property price. Many of the prices were 0 USD, meaning that there were shifts in ownership free of charge. Also, there was a huge disparity in living expense. Some of the prices go up in the millions. To prevent harm in the analysis, we filtered the price and set all 0 values to the average of the filtered price. By removing parts of the price range, we might not be seeing the complete picture.
+
+Any further research that would like to find the correlation between individual wealth and academic performance should take these possibilities into consideration.
+
+This concludes the analysis between SAT scores and Property Sales in NYC. 
+
+
+##Datasets Credits:
+
+[Average SAT Scores for NYC Public Schools dataset] was compiled and published by the New York City Department of Education, and the SAT score averages and testing rates were provided by the College Board. https://www.kaggle.com/nycopendata/high-schools
+
+[NYC Property Sales dataset] is a concatenated and slightly cleaned-up version of the New York City Department of Finance's Rolling Sales dataset. https://www.kaggle.com/new-york-city/nyc-property-sales
